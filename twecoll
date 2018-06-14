@@ -19,10 +19,14 @@ FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 DEALINGS IN THE SOFTWARE.
 '''
 
+
+from future.standard_library import install_aliases
+install_aliases()
+
 import argparse
-import urlparse
-import urllib2
-import urllib
+from urllib.parse import urlparse, urlencode, quote, parse_qsl
+from urllib.request import urlopen, Request, BaseHandler, build_opener, install_opener
+from urllib.error import HTTPError
 import hashlib
 import base64
 import hmac
@@ -61,7 +65,7 @@ Consumer = namedtuple('Consumer', 'key secret')
 Token = namedtuple('Token', 'key secret')
 
 def _quote(text):
-  return urllib.quote(text, '-._~')
+  return quote(text, '-._~')
 
 def _encode(params):
   return '&'.join(['%s=%s' % (k, v) for k, v in params])
@@ -80,11 +84,11 @@ def _parse_uri(req):
       query = ''
   return method, uri, query
 
-class Request(urllib2.Request):
+class Request(Request):
   def __init__(self, url, \
     data=None, headers={}, origin_req_host=None, unverifiable=False, \
     method=None, oauth_params={}):
-    urllib2.Request.__init__( \
+    Request.__init__( \
       self, url, data, headers, origin_req_host, unverifiable)
     self.method = method
     self.oauth_params = oauth_params
@@ -97,7 +101,7 @@ class Request(urllib2.Request):
     else:
       return 'GET'
 
-class OAuthHandler(urllib2.BaseHandler):
+class OAuthHandler(BaseHandler):
   def __init__(self, consumer, token=None, timeout=None):
     self.consumer = consumer
     self.token = token
@@ -108,7 +112,7 @@ class OAuthHandler(urllib2.BaseHandler):
     if self.token is not None:
       key += _quote(self.token.secret)
     signature_base = '&'.join((method.upper(), _quote(uri), _quote(query)))
-    signature = hmac.new(str(key), signature_base, hashlib.sha1)
+    signature = hmac.new(key, signature_base, hashlib.sha1)
     return base64.b64encode(signature.digest())
 
   def http_request(self, req):
@@ -118,7 +122,7 @@ class OAuthHandler(urllib2.BaseHandler):
     if method == 'POST':
       req.add_header('Content-type', 'application/x-www-form-urlencoded')
 
-    query = map(lambda (k, v): (k, urllib.quote(v)), urlparse.parse_qsl(query))
+    query = list(map(lambda args: (args[0], quote(args[1])), parse_qsl(query)))
 
     oauth_params = [
       ('oauth_consumer_key', self.consumer.key),
@@ -157,7 +161,7 @@ class OAuthHandler(urllib2.BaseHandler):
 def _replace_opener():
   filename = os.path.expanduser('~')+'/.'+os.path.basename(sys.argv[0])
   if os.path.isfile(filename):
-    f = open(filename, 'r')
+    f = open(filename, 'rb')
     lines = f.readlines()
     key = lines[0].strip()
     secret = lines[1].strip()
@@ -176,7 +180,7 @@ def _replace_opener():
     oauth_secret = lines[3].strip()
     atoken = Token(oauth, oauth_secret)
   except IndexError:
-    opener = urllib2.build_opener(OAuthHandler(consumer))
+    opener = build_opener(OAuthHandler(consumer))
     resp = opener.open(Request('https://api.twitter.com/oauth/request_token'))
     rtoken = urlparse.parse_qs(resp.read())
     rtoken = Token(rtoken['oauth_token'][0], rtoken['oauth_token_secret'][0])
@@ -184,7 +188,7 @@ def _replace_opener():
 '>>> https://api.twitter.com/oauth/authorize?oauth_token=%s\n''' % rtoken.key)
     sys.stderr.write('What is the PIN? ')
     verifier = sys.stdin.readline().rstrip('\r\n')
-    opener = urllib2.build_opener(OAuthHandler(consumer, rtoken))
+    opener = build_opener(OAuthHandler(consumer, rtoken))
     resp = opener.open( \
       Request('https://api.twitter.com/oauth/access_token', \
       oauth_params={'oauth_verifier': verifier}))
@@ -197,8 +201,8 @@ def _replace_opener():
     f.write(atoken.secret+'\n')
     f.close()
     sys.stderr.write('Setup complete and %s created.\n' % filename)
-  opener = urllib2.build_opener(OAuthHandler(consumer, atoken))
-  urllib2.install_opener(opener)
+  opener = build_opener(OAuthHandler(consumer, atoken))
+  install_opener(opener)
 
 def _fetch_img(user_id, avatar):
   conn = urllib.urlopen(avatar)
@@ -226,8 +230,8 @@ def resolve(args):
         url = 'https://api.twitter.com/1.1/users/show.json?user_id=%s'
       else:
         url = 'https://api.twitter.com/1.1/users/show.json?screen_name=%s'
-      conn = urllib2.urlopen(url % sn)
-    except urllib2.HTTPError, e:
+      conn = urlopen(url % sn)
+    except HTTPError(e):
       if e.code in SKIP_CODES:
         sys.stdout.write('HTTPError %s with %s. Skipping...\n' % (e.code, sn))
         continue
@@ -242,9 +246,9 @@ def resolve(args):
     sys.stdout.write('(%s friends | %s followers | %s memberships | %s tweets)\n' % (\
       data['friends_count'], data['followers_count'], data['listed_count'], data['statuses_count']))
 
-class CursorError(urllib2.HTTPError):
+class CursorError(HTTPError):
   def __init__(self, code, cursor=None, res=None):
-    urllib2.HTTPError.__init__(self, None, code, None, None, None)
+    HTTPError.__init__(self, None, code, None, None, None)
     self.cursor = cursor
     self.res = res
 
@@ -255,8 +259,8 @@ def _ids(relation, param, c=None, init=None):
   while True:
     try:
       url = 'https://api.twitter.com/1.1/%s/ids.json?%s&cursor=%s'
-      conn = urllib2.urlopen(url % (relation, param, cursor))
-    except urllib2.HTTPError, e:
+      conn = urlopen(url % (relation, param, cursor))
+    except HTTPError(e):
       raise CursorError(e.code, cursor, res)
     data = json.loads(conn.read())
     conn.close()
@@ -273,8 +277,8 @@ def _members(param, c=None, init=None):
   while True:
     try:
       url = 'https://api.twitter.com/1.1/lists/members.json?%s&cursor=%s&include_entities=false&skip_status=true'
-      conn = urllib2.urlopen(url % (param, cursor))
-    except urllib2.HTTPError, e:
+      conn = urlopen(url % (param, cursor))
+    except HTTPError(e):
       raise CursorError(e.code, cursor, res)
     data = json.loads(conn.read())
     conn.close()
@@ -315,12 +319,12 @@ def init(args):
           bag = _members('slug='+args.l+'&owner_screen_name='+args.screen_name, cursor, res)
         else:
           url = 'https://api.twitter.com/1.1/users/show.json?screen_name=%s'
-          conn = urllib2.urlopen(url % args.screen_name)
+          conn = urlopen(url % args.screen_name)
           data = json.loads(conn.read())
           conn.close()
           bag = [data['id']] + _ids(type, 'screen_name='+args.screen_name, cursor, res)
         break
-      except CursorError, e:
+      except CursorError(e):
         if e.code in WAIT_CODES:
           sys.stderr.write('HTTPError %s at %s. Waiting %sm to resume...' % \
             (e.code, time.strftime('%H:%M', time.localtime()), RL_WINDOW/60))
@@ -359,8 +363,8 @@ def init(args):
       else:
         url = 'https://api.twitter.com/1.1/users/lookup.json?user_id=%s&include_entities=false'
         items_str = ','.join(map(str, next_items))
-      conn = urllib2.urlopen(url % items_str)
-    except (urllib2.HTTPError, socket.error) as e:
+      conn = urlopen(url % items_str)
+    except (HTTPError, socket.error) as e:
       if hasattr(e, 'code') and e.code in SKIP_CODES:
         # 404 if no lookup criteria could be satisified
         sys.stdout.write('HTTPError %s starting from %s. Skipping...\n' % (e.code, next_items[0]))
@@ -631,8 +635,8 @@ def _destroy(screen_name):
     try:
       url = 'https://api.twitter.com/1.1/favorites/destroy.json'
       data = {'id': item}
-      conn = urllib2.urlopen(url, urllib.urlencode(data))
-    except urllib2.HTTPError, e:
+      conn = urlopen(url, urllib.urlencode(data))
+    except HTTPError(e):
       if e.code in SKIP_CODES:
         sys.stdout.write('HTTPError %s with %s. Skipping...\n' % (e.code, item))
         continue
@@ -675,8 +679,8 @@ def likes(args):
         url = 'https://api.twitter.com/1.1/favorites/list.json?count=%s&screen_name=%s'
         if max_id:
           url += '&max_id=%i' % max_id
-        conn = urllib2.urlopen(url % (200, args.screen_name))
-      except urllib2.HTTPError, e:
+        conn = urlopen(url % (200, args.screen_name))
+      except HTTPError(e):
         if e.code in RETRY_CODES:
           sys.stderr.write('\nHTTPError %s. Retrying' % e.code)
           sys.stderr.flush()
@@ -731,8 +735,8 @@ def tweets(args):
         url = 'https://api.twitter.com/1.1/statuses/user_timeline.json?screen_name=%s&count=200&tweet_mode=extended'
       if max_id:
         url += '&max_id=%i' % max_id
-      conn = urllib2.urlopen(url % args.screen_name)
-    except urllib2.HTTPError, e:
+      conn = urlopen(url % args.screen_name)
+    except HTTPError(e):
       if e.code in RETRY_CODES:
         sys.stderr.write('\nHTTPError %s. Retrying' % e.code)
         sys.stderr.flush()
@@ -775,7 +779,7 @@ class StatsAction(argparse.Action):
   def __call__(self, parse, namespace, values, option_string=None):
     _replace_opener()
     url = 'https://api.twitter.com/1.1/application/rate_limit_status.json?resources=users,friends,statuses,search,favorites'
-    conn = urllib2.urlopen(url)
+    conn = urlopen(url)
     data = json.loads(conn.read())
     conn.close()
     sys.stdout.write('init (%s), ' % \
@@ -794,9 +798,9 @@ class StatsAction(argparse.Action):
 class QuoteAction(argparse.Action):
   def __call__(self, parse, namespace, values, option_string=None):
     if isinstance(values, list):
-      setattr(namespace, self.dest, map(lambda v: urllib.quote(v), values))
+      setattr(namespace, self.dest, map(lambda v: quote(v), values))
     else:
-      setattr(namespace, self.dest, urllib.quote(values))
+      setattr(namespace, self.dest, quote(values))
 
 def main():
   parser = argparse.ArgumentParser(description='Twitter Collection Tool')
@@ -885,7 +889,7 @@ def main():
   except KeyboardInterrupt:
     sys.stderr.write('\n')
     return 2
-  except Exception, err:
+  except Exception(err):
     sys.stderr.write(str(err)+'\n')
     return 1
   else:
